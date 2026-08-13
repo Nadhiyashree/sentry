@@ -20,32 +20,14 @@ The Action operates as a modular, three-part pipeline:
 
 ---
 
-## 3. Installation
-To install Sentry on the Diff in your GitHub Action workflow, simply copy this repository's folder or reference its repository path directly:
+## 3. Installation & Usage Modes
+
+### Mode A: Running/Testing inside the Sentry Repository
+If you are developing or testing the Action internally inside the `sentry` repository itself, you can trigger it locally.
+
+Create `.github/workflows/pr-sentry.yml` inside the Sentry repo:
 ```yaml
-uses: Nadhiyashree/sentry@main
-```
-
----
-
-## 4. GitHub Action Setup
-To setup the action in your target C# repository:
-1. Ensure your repository has workflows enabled.
-2. Store your workflow file under `.github/workflows/pr-sentry.yml`.
-3. Provide the default `GITHUB_TOKEN` so the Action has permissions to read contents and write PR comments.
-
----
-
-## 5. Required Secrets
-* `GITHUB_TOKEN`: Automatically provided by GitHub Actions (requires `pull-requests: write` and `contents: read` permissions).
-* `GEMINI_API_KEY` (Optional): Create an API Key in Google AI Studio to unlock LLM-powered review checks.
-
----
-
-## 6. Workflow Configuration
-Create a `.github/workflows/pr-sentry.yml` workflow file:
-```yaml
-name: PR Code Reviewer
+name: PR Code Reviewer (Internal)
 
 on:
   pull_request:
@@ -62,11 +44,46 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Sentry on the Diff
+        uses: ./ # References the local action in the root of the repo
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
+```
+
+### Mode B: Consuming the Published Action from Another C# Repository
+To consume this Action from any external C# project repository, configure a workflow file under `.github/workflows/sentry.yml` in your target repository with the following exact configuration:
+
+```yaml
+name: Sentry on the Diff
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  sentry:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Run Sentry on the Diff
         uses: Nadhiyashree/sentry@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
 ```
+
+---
+
+## 4. Required Secrets
+* `GITHUB_TOKEN`: Automatically provided by GitHub Actions (requires `pull-requests: write` and `contents: read` permissions).
+* `GEMINI_API_KEY` (Optional): Create an API Key in Google AI Studio to unlock LLM-powered review checks.
+
 
 ---
 

@@ -14,11 +14,21 @@ async function reviewDiffs(fileDiffs, geminiApiKey) {
     core.info(`Reviewing file: ${file}`);
 
     for (const hunk of fileDiff.hunks) {
-      const validLines = new Set(hunk.additions.map(a => a.lineNum));
+      const validLines = new Set(hunk.additions.map(a => Number(a.lineNum)));
       
       // 1. Run local static rule-based reviewer
       const staticFindings = reviewHunkStatic(file, hunk, validLines);
-      allFindings.push(...staticFindings);
+      
+      // Grounding validation on all static findings
+      const groundedStaticFindings = [];
+      for (const finding of staticFindings) {
+        if (validLines.has(Number(finding.line))) {
+          groundedStaticFindings.push(finding);
+        } else {
+          core.info(`[grounding] Dropping static finding at line ${finding.line} because line ${finding.line} is not an added line.`);
+        }
+      }
+      allFindings.push(...groundedStaticFindings);
 
       // 2. Run LLM reviewer if API key is provided
       if (geminiApiKey) {
@@ -27,8 +37,14 @@ async function reviewDiffs(fileDiffs, geminiApiKey) {
           
           // Merge LLM findings, avoiding duplicates with static findings
           for (const llmF of llmFindings) {
-            const isDuplicate = staticFindings.some(sf => 
-              sf.line === llmF.line && 
+            // Strict grounding check for LLM findings
+            if (!validLines.has(Number(llmF.line))) {
+              core.info(`[grounding] Dropping LLM finding at line ${llmF.line} because line ${llmF.line} is not an added line.`);
+              continue;
+            }
+
+            const isDuplicate = groundedStaticFindings.some(sf => 
+              Number(sf.line) === Number(llmF.line) && 
               sf.category === llmF.category
             );
             if (!isDuplicate) {
