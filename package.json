@@ -1,0 +1,27 @@
+{
+  "name": "sentry-on-the-diff",
+  "version": "1.0.0",
+  "description": "Build a GitHub Action That Reviews C# Pull Requests for SOLID, Null-Safety and Async Correctness",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "ncc build index.js -o dist --minify --no-cache"
+  },
+  "keywords": [
+    "github",
+    "actions",
+    "csharp",
+    "solid",
+    "null-safety",
+    "async",
+    "code-review"
+  ],
+  "author": "Antigravity",
+  "license": "MIT",
+  "dependencies": {
+    "@actions/core": "^1.10.1",
+    "@actions/github": "^6.0.0"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "^0.38.1"
+  }
+}

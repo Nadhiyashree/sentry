@@ -1,0 +1,20 @@
+name: "Sentry on the Diff"
+description: "Automatically reviews C# Pull Requests for SOLID, null-safety, and async/await correctness on code diffs."
+author: "Antigravity"
+inputs:
+  github-token:
+    description: "GitHub token (GITHUB_TOKEN or fine-grained PAT) with write permissions to pull requests"
+    required: true
+    default: "${{ github.token }}"
+  gemini-api-key:
+    description: "Optional Google Gemini API key to enable LLM-powered review checks"
+    required: false
+outputs:
+  findings-count:
+    description: "The total number of design/safety findings posted in the PR review comments"
+runs:
+  using: "node20"
+  main: "dist/index.js"
+branding:
+  icon: "eye"
+  color: "red"
