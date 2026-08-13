@@ -18,25 +18,36 @@ async function publishReview(octokit, context, findings) {
   core.info(`Fetching existing PR comments...`);
   let existingComments = [];
   try {
-    const response = await octokit.rest.pulls.listReviewComments({
+    existingComments = await octokit.paginate(octokit.rest.pulls.listReviewComments, {
       owner,
       repo,
       pull_number: prNumber,
-      per_page: 100 // Fetch up to 100 comments (paginate if needed, but 100 is generally plenty)
+      per_page: 100
     });
-    existingComments = response.data;
   } catch (error) {
     core.warning(`Failed to fetch existing comments: ${error.message}. Proceeding without de-duplication.`);
   }
 
-  // Create a index of existing bot comments: "file:line:category"
+  // Helper to normalize message strings for comparison
+  function normalizeMessage(msg) {
+    return msg.toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  // Create an index of existing bot comments: "file:line:category:normalizedMessage"
   const existingCommentKeys = new Set();
   for (const comment of existingComments) {
     if (!comment.body) continue;
     const botMatch = comment.body.match(/<!-- sentry-review:\s*([\w-]+)\s*-->/);
     if (botMatch) {
       const category = botMatch[1];
-      const key = `${comment.path}:${comment.line}:${category}`;
+      
+      // Clean comment body to extract raw message
+      const bodyClean = comment.body
+        .replace(/<!-- sentry-review:\s*[\w-]+\s*-->/, '')
+        .replace(/\*\*\[[\w-]+\]\*\*/, '')
+        .trim();
+        
+      const key = `${comment.path}:${comment.line}:${category}:${normalizeMessage(bodyClean)}`;
       existingCommentKeys.add(key);
     }
   }
@@ -44,9 +55,9 @@ async function publishReview(octokit, context, findings) {
   // 2. Filter findings that are already posted
   const newFindings = [];
   for (const finding of findings) {
-    const key = `${finding.file}:${finding.line}:${finding.category}`;
+    const key = `${finding.file}:${finding.line}:${finding.category}:${normalizeMessage(finding.message)}`;
     if (existingCommentKeys.has(key)) {
-      core.info(`Skipping duplicate finding: ${key}`);
+      core.info(`Skipping duplicate finding (message matched): ${finding.file}:${finding.line}:${finding.category}`);
       continue;
     }
     newFindings.push(finding);

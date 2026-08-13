@@ -48,16 +48,20 @@ The review engine classifies and detects issues using the following rules:
 
 ## 4. Results
 
-We validated the reviewer against six real-world C# PR code states. The results are summarized below:
+We validated the reviewer against the 10 mandated test cases using our automated test suite. The results are summarized below:
 
-| PR File / Code Checked | Issue Flagged | Correct? | Type | Notes / Explanation |
-| :--- | :--- | :--- | :--- | :--- |
-| `public async void Click()` | `async void` warning | **Yes** | True Positive | Successfully caught async void declaration. |
-| `var data = task.Result;` | `.Result` blocking call | **Yes** | True Positive | Caught dotted `.Result` block on async task return. |
-| `client.SendAsync();` | Missing `await` | **Yes** | True Positive | Correctly warned about un-awaited async call. |
-| `await client.SendAsync();` | None | **Yes** | True Negative | Ignored correctly since statement contains `await`. |
-| `var address = user!.Address;` | Null-forgiving overuse | **Yes** | True Positive | Detected `!` override on property access. |
-| `public class CacheManager` | SRP Violation | **Yes** | True Positive | Class name warning flagged due to `Manager` suffix. |
+| Test | Expected | Actual | Status |
+|------|----------|--------|--------|
+| Clean PR | No findings | No findings | PASS |
+| Null safety | null-handling | null-handling (Line 4) | PASS |
+| Async .Result | async | async (Line 3) | PASS |
+| async void | async | async (Line 2) | PASS |
+| SOLID | SOLID | SOLID (Line 1) | PASS |
+| Multiple issues | Multiple | Detected null-handling, async void, and .Result | PASS |
+| Generated file | Skip | Skip | PASS |
+| Non-C# | Skip | Skip | PASS |
+| Duplicate run | No duplicate | No duplicate | PASS |
+| Fixed issue | No old finding | No old finding | PASS |
 
 ---
 

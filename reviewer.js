@@ -52,114 +52,226 @@ async function reviewDiffs(fileDiffs, geminiApiKey) {
  * @param {Set<number>} validLines 
  * @returns {Array<object>} Static findings
  */
+/**
+ * Static rule-based reviewer using regex and pattern analysis.
+ * @param {string} file 
+ * @param {object} hunk 
+ * @param {Set<number>} validLines 
+ * @returns {Array<object>} Static findings
+ */
 function reviewHunkStatic(file, hunk, validLines) {
   const findings = [];
+  
+  const headerMatch = hunk.header.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+  const startLine = headerMatch ? parseInt(headerMatch[1], 10) : 1;
+  let currentNewLine = startLine;
 
-  for (const addition of hunk.additions) {
-    const { lineNum, content } = addition;
-    const trimmedContent = content.trim();
+  const variables = new Map(); // Tracks varName -> { lineDeclared, guarded, isAdded }
 
-    // Skip comments or empty lines
-    if (trimmedContent.startsWith('//') || trimmedContent.startsWith('/*') || trimmedContent === '') {
+  // Domains for SOLID checks
+  const srpDomains = {
+    database: /(Save|Delete|Update|Insert|Database|Db|Repository|Sql|Store)/i,
+    notification: /(Email|Send|Notify|Mail|Sms|Message)/i,
+    calculation: /(Calculate|Compute|Salary|Tax|Process|Verify)/i,
+    reporting: /(Report|Generate|Print|Export|Format|Render)/i
+  };
+  let currentClassLine = null;
+  let currentClassName = null;
+  let currentClassDomains = new Set();
+
+  for (const line of hunk.lines) {
+    const isDeletion = line.startsWith('-');
+    const isAddition = line.startsWith('+');
+    const cleanLine = line.slice(1);
+    const trimmed = cleanLine.trim();
+
+    if (isDeletion) {
       continue;
     }
 
-    // --- ASYNC CORRECTNESS RULES ---
-
-    // Async void check
-    // e.g. "public async void MyMethod("
-    if (/\basync\s+void\s+\w+\s*\(/.test(trimmedContent)) {
-      findings.push({
-        file,
-        line: lineNum,
-        category: 'async',
-        severity: 'warning',
-        message: "Avoid using 'async void'. Use 'async Task' instead so that exceptions can be caught and the caller can await the execution.",
-        hunk_ref: hunk.header
-      });
+    if (trimmed === '' || trimmed.startsWith('//') || trimmed.startsWith('/*')) {
+      currentNewLine++;
+      continue;
     }
 
-    // Blocking async calls using .Result or .Wait()
-    // e.g. "task.Result" or "task.Wait()"
-    if (/\.(Result|Wait\(\))\b/.test(trimmedContent)) {
-      findings.push({
-        file,
-        line: lineNum,
-        category: 'async',
-        severity: 'warning',
-        message: "Avoid blocking asynchronous calls using '.Result' or '.Wait()'. Use 'await' to prevent deadlocks and release thread resources.",
-        hunk_ref: hunk.header
-      });
+    // 1. Guard check: Update tracking map if any tracked variable is guarded on this line
+    for (const [varName, varState] of variables.entries()) {
+      if (!varState.guarded) {
+        const isGuardedRegex = new RegExp(
+          `\\b${varName}\\s*(==|is|!=)\\s*null\\b|` +
+          `\\bnull\\s*(==|!=)\\s*${varName}\\b|` +
+          `\\b${varName}\\s+is\\s+not\\s+null\\b|` +
+          `\\bThrowIfNull\\(\\s*${varName}\\b|` +
+          `\\b(if|while)\\s*\\(\\s*${varName}\\b|` +
+          `\\b${varName}\\?\\.`
+        );
+        
+        if (isGuardedRegex.test(trimmed)) {
+          varState.guarded = true;
+        }
+      }
     }
 
-    // Missing await on async method calls
-    // e.g. "DoSomethingAsync();" without await, return, or assignment
-    if (/\b\w+Async\s*\(/.test(trimmedContent)) {
-      const isAwaited = /\bawait\b/.test(trimmedContent);
-      const isReturned = /\breturn\b/.test(trimmedContent);
-      const isAssigned = trimmedContent.includes('=');
-      const isDefinition = /\b(class|interface|void|Task|ValueTask|async)\b/.test(trimmedContent);
+    // 2. Dereference check: Check if any UNGUARDED tracked variable is dereferenced using '.' on this line
+    for (const [varName, varState] of variables.entries()) {
+      if (!varState.guarded) {
+        const derefRegex = new RegExp(`\\b${varName}\\s*(?<!\\?)\\.\\s*[a-zA-Z_]`);
+        if (derefRegex.test(trimmed)) {
+          if (isAddition) {
+            findings.push({
+              file,
+              line: currentNewLine,
+              category: 'null-handling',
+              severity: 'warning',
+              message: `Possible null dereference of '${varName}'. Add appropriate null handling before accessing this value.`,
+              hunk_ref: hunk.header
+            });
+            varState.guarded = true;
+          }
+        }
+      }
+    }
 
-      if (!isAwaited && !isReturned && !isAssigned && !isDefinition && !/\.(Result|Wait\(\))\b/.test(trimmedContent)) {
+    // 3. Track new variable assignments:
+    // Match var x = ...; or Type x = ...;
+    const assignmentMatch = trimmed.match(/^(?:var|[a-zA-Z0-9_\.\langle\rangle\?]+)\s+([a-zA-Z0-9_]+)\s*=\s*(.+?);/);
+    if (assignmentMatch) {
+      const varName = assignmentMatch[1];
+      const expr = assignmentMatch[2].trim();
+      
+      const isNew = expr.startsWith('new ') || expr.startsWith('new(');
+      const isLiteral = /^\d+(\.\d+)?$/.test(expr) || /^(".*"|'.*')$/.test(expr) || /^(true|false)$/.test(expr);
+      const isCoalesced = expr.includes('??');
+      const isKeyword = ['return', 'throw', 'yield', 'await', 'using'].includes(varName);
+
+      if (!isNew && !isLiteral && !isCoalesced && !isKeyword) {
+        variables.set(varName, {
+          lineDeclared: currentNewLine,
+          guarded: false,
+          isAdded: isAddition
+        });
+      }
+    }
+
+    // 4. SOLID SRP Domain tracking:
+    const classMatch = trimmed.match(/\bclass\s+(\w+)\b/);
+    if (classMatch) {
+      currentClassName = classMatch[1];
+      currentClassLine = currentNewLine;
+      currentClassDomains = new Set();
+    }
+
+    if (currentClassName) {
+      const methodMatch = trimmed.match(/(?:public|private|protected|internal|async|\s)*\b(?:void|Task|ValueTask|[\w\langle\rangle\?]+)\s+(\w+)\s*\(/);
+      if (methodMatch) {
+        const methodName = methodMatch[1];
+        if (!['if', 'while', 'for', 'foreach', 'switch', 'using', 'catch', 'lock'].includes(methodName)) {
+          for (const [domain, regex] of Object.entries(srpDomains)) {
+            if (regex.test(methodName)) {
+              currentClassDomains.add(domain);
+            }
+          }
+        }
+      }
+
+      if (currentClassDomains.size >= 3) {
+        if (isAddition) {
+          findings.push({
+            file,
+            line: currentClassLine || currentNewLine,
+            category: 'SOLID',
+            severity: 'warning',
+            message: `This class '${currentClassName}' appears to contain multiple unrelated responsibilities (${Array.from(currentClassDomains).join(', ')}). Consider separating these responsibilities into smaller components.`,
+            hunk_ref: hunk.header
+          });
+          currentClassName = null;
+        }
+      }
+    }
+
+    // 5. Existing C# checks on ADDED lines:
+    if (isAddition) {
+      // --- ASYNC CORRECTNESS RULES ---
+      if (/\basync\s+void\s+\w+\s*\(/.test(trimmed)) {
         findings.push({
           file,
-          line: lineNum,
+          line: currentNewLine,
           category: 'async',
           severity: 'warning',
-          message: "Potential missing 'await' on an asynchronous method call. Consider prepending 'await' to ensure completion.",
+          message: "Avoid using 'async void'. Use 'async Task' instead so that exceptions can be caught and the caller can await the execution.",
+          hunk_ref: hunk.header
+        });
+      }
+
+      if (/\.(Result|Wait\(\))\b/.test(trimmed)) {
+        findings.push({
+          file,
+          line: currentNewLine,
+          category: 'async',
+          severity: 'warning',
+          message: "Avoid blocking asynchronous calls using '.Result' or '.Wait()'. Use 'await' to prevent deadlocks and release thread resources.",
+          hunk_ref: hunk.header
+        });
+      }
+
+      if (/\b\w+Async\s*\(/.test(trimmed)) {
+        const isAwaited = /\bawait\b/.test(trimmed);
+        const isReturned = /\breturn\b/.test(trimmed);
+        const isAssigned = trimmed.includes('=');
+        const isDefinition = /\b(class|interface|void|Task|ValueTask|async)\b/.test(trimmed);
+
+        if (!isAwaited && !isReturned && !isAssigned && !isDefinition && !/\.(Result|Wait\(\))\b/.test(trimmed)) {
+          findings.push({
+            file,
+            line: currentNewLine,
+            category: 'async',
+            severity: 'warning',
+            message: "Potential missing 'await' on an asynchronous method call. Consider prepending 'await' to ensure completion.",
+            hunk_ref: hunk.header
+          });
+        }
+      }
+
+      // --- NULL-SAFETY RULES ---
+      if (/\b\w+!\s*\.\s*\w+/.test(trimmed) || /\b\w+!\s*[;,]/.test(trimmed)) {
+        findings.push({
+          file,
+          line: currentNewLine,
+          category: 'null-handling',
+          severity: 'warning',
+          message: "Avoid overusing the null-forgiving operator '!'. Perform actual null validation checks instead of bypassing the C# compiler safety.",
+          hunk_ref: hunk.header
+        });
+      }
+
+      if (/\bclass\s+\w*(Manager|Helper|Utility|Utilities|Common)\b/.test(trimmed)) {
+        const match = trimmed.match(/\bclass\s+(\w+)\b/);
+        const className = match ? match[1] : 'this class';
+        findings.push({
+          file,
+          line: currentNewLine,
+          category: 'SOLID',
+          severity: 'warning',
+          message: `The class name '${className}' suggests it might be a God class or utility wrapper violating the Single Responsibility Principle (SRP). Consider splitting it into focused, domain-specific components.`,
+          hunk_ref: hunk.header
+        });
+      }
+
+      if (/\bnew\s+(HttpClient|DbContext|\w+Service|\w+Repository)\(/.test(trimmed)) {
+        const match = trimmed.match(/\bnew\s+(\w+)\(/);
+        const dependency = match ? match[1] : 'this object';
+        findings.push({
+          file,
+          line: currentNewLine,
+          category: 'SOLID',
+          severity: 'warning',
+          message: `Tight coupling detected: instantiation of '${dependency}' via the 'new' operator. Consider injecting this dependency through the constructor (Dependency Inversion Principle) to improve testability and modularity.`,
           hunk_ref: hunk.header
         });
       }
     }
 
-    // --- NULL-SAFETY RULES ---
-
-    // Overuse of null-forgiving operator
-    // e.g. "var address = customer!.Address;" or "client!."
-    if (/\b\w+!\s*\.\s*\w+/.test(trimmedContent) || /\b\w+!\s*[;,]/.test(trimmedContent)) {
-      findings.push({
-        file,
-        line: lineNum,
-        category: 'null-handling',
-        severity: 'warning',
-        message: "Avoid overusing the null-forgiving operator '!'. Perform actual null validation checks instead of bypassing the C# compiler safety.",
-        hunk_ref: hunk.header
-      });
-    }
-
-    // Assignment and immediate dot-access without null check
-    // e.g. "var x = Get(); x.Do();" where x could be null
-    // (Checked across consecutive lines in the hunk)
-    
-    // --- SOLID PRINCIPLES RULES ---
-
-    // Mix of responsibilities: classes with names ending in Manager, Helper, Utility, Common
-    if (/\bclass\s+\w*(Manager|Helper|Utility|Utilities|Common)\b/.test(trimmedContent)) {
-      const match = trimmedContent.match(/\bclass\s+(\w+)\b/);
-      const className = match ? match[1] : 'this class';
-      findings.push({
-        file,
-        line: lineNum,
-        category: 'SOLID',
-        severity: 'warning',
-        message: `The class name '${className}' suggests it might be a God class or utility wrapper violating the Single Responsibility Principle (SRP). Consider splitting it into focused, domain-specific components.`,
-        hunk_ref: hunk.header
-      });
-    }
-
-    // Tight coupling: direct instantiation of major dependencies
-    if (/\bnew\s+(HttpClient|DbContext|\w+Service|\w+Repository)\(/.test(trimmedContent)) {
-      const match = trimmedContent.match(/\bnew\s+(\w+)\(/);
-      const dependency = match ? match[1] : 'this object';
-      findings.push({
-        file,
-        line: lineNum,
-        category: 'SOLID',
-        severity: 'warning',
-        message: `Tight coupling detected: instantiation of '${dependency}' via the 'new' operator. Consider injecting this dependency through the constructor (Dependency Inversion Principle) to improve testability and modularity.`,
-        hunk_ref: hunk.header
-      });
-    }
+    currentNewLine++;
   }
 
   return findings;
